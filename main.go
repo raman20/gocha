@@ -1,103 +1,123 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"time"
+	"unicode/utf8"
 )
 
-// MessageType represents the type of message being sent.
+const (
+	Port        = "6969"
+	SafeMode    = true
+	MessageRate = 1.0
+	BanLimit    = 10 * 60.0
+	StrikeLimit = 10
+)
+
+func sensitive(message string) string {
+	if SafeMode {
+		return "[REDACTED]"
+	} else {
+		return message
+	}
+}
+
 type MessageType int
 
 const (
-	ClientConnected    MessageType = iota + 1 // Client connection event
-	NewMessage                                // New message event
-	ClientDisconnected                        // Client disconnection event
+	ClientConnected MessageType = iota + 1
+	ClientDisconnected
+	NewMessage
 )
 
-// Message represents a message sent by a client.
 type Message struct {
-	Type MessageType // Type of the message
-	Conn net.Conn    // Connection of the author
-	Text string      // Content of the message
+	Type MessageType
+	Conn net.Conn
+	Text string
 }
 
-// Client represents a connected client.
 type Client struct {
-	Conn        net.Conn  // Connection to the client
-	LastMessage time.Time // Timestamp of the last message sent
+	Conn        net.Conn
+	LastMessage time.Time
 	StrikeCount int
 }
 
-// server handles incoming messages and manages connected clients.
 func server(messages chan Message) {
-	clients := make(map[string]*Client)     // Map to track connected clients
-	bannedClients := map[string]time.Time{} // Map to track banned clients
+	clients := map[string]*Client{}
+	bannedMfs := map[string]time.Time{}
 	for {
-		msg := <-messages // Wait for a message
+		msg := <-messages
 		switch msg.Type {
 		case ClientConnected:
-
 			addr := msg.Conn.RemoteAddr().(*net.TCPAddr)
-			bannedAt, banned := bannedClients[addr.IP.String()]
-
+			bannedAt, banned := bannedMfs[addr.IP.String()]
+			now := time.Now()
 			if banned {
-				if time.Since(bannedAt).Seconds() >= 60.0 {
-					delete(bannedClients, addr.IP.String())
+				if now.Sub(bannedAt).Seconds() >= BanLimit {
+					delete(bannedMfs, addr.IP.String())
 					banned = false
-				} else {
-					msg.Conn.Write([]byte("you are banned\n"))
-					msg.Conn.Close()
 				}
-			} else {
-				log.Printf("Client %s connected", msg.Conn.RemoteAddr())
-				clients[addr.IP.String()] = &Client{
+			}
+
+			if !banned {
+				log.Printf("Client %s connected", sensitive(addr.String()))
+				clients[msg.Conn.RemoteAddr().String()] = &Client{
 					Conn:        msg.Conn,
 					LastMessage: time.Now(),
 				}
+			} else {
+				msg.Conn.Write([]byte(fmt.Sprintf("You are banned MF: %f secs left\n", BanLimit-now.Sub(bannedAt).Seconds())))
+				msg.Conn.Close()
 			}
-		case NewMessage:
+		case ClientDisconnected:
 			addr := msg.Conn.RemoteAddr().(*net.TCPAddr)
+			log.Printf("Client %s disconnected", sensitive(addr.String()))
+			delete(clients, addr.String())
+		case NewMessage:
+			authorAddr := msg.Conn.RemoteAddr().(*net.TCPAddr)
+			author := clients[authorAddr.String()]
 			now := time.Now()
-			author := clients[addr.IP.String()]
 			if author != nil {
-				if now.Sub(author.LastMessage).Seconds() >= 1.0 {
-					author.LastMessage = now
-					author.StrikeCount = 0
-					log.Printf("Client %s sent message: %s", msg.Conn.RemoteAddr(), msg.Text)
-					for _, client := range clients {
-						if client.Conn.RemoteAddr().String() != msg.Conn.RemoteAddr().String() {
-							_, err := client.Conn.Write([]byte(msg.Text))
-							if err != nil {
-								log.Printf("Could not send data to %s", client.Conn.RemoteAddr())
+				if now.Sub(author.LastMessage).Seconds() >= MessageRate {
+					if utf8.ValidString(msg.Text) {
+						author.LastMessage = now
+						author.StrikeCount = 0
+						log.Printf("Client %s sent message %s", sensitive(authorAddr.String()), msg.Text)
+						for _, client := range clients {
+							if client.Conn.RemoteAddr().String() != authorAddr.String() {
+								client.Conn.Write([]byte(msg.Text))
 							}
+						}
+					} else {
+						author.StrikeCount += 1
+						if author.StrikeCount >= StrikeLimit {
+							bannedMfs[authorAddr.IP.String()] = now
+							author.Conn.Write([]byte("You are banned MF\n"))
+							author.Conn.Close()
 						}
 					}
 				} else {
 					author.StrikeCount += 1
-					if author.StrikeCount >= 10 {
-						bannedClients[addr.IP.String()] = now
-						author.Conn.Write([]byte("you are banned\n"))
+					if author.StrikeCount >= StrikeLimit {
+						bannedMfs[authorAddr.IP.String()] = now
+						author.Conn.Write([]byte("You are banned MF\n"))
 						author.Conn.Close()
 					}
 				}
 			} else {
 				msg.Conn.Close()
 			}
-		case ClientDisconnected:
-			log.Printf("Client %s disconnected", msg.Conn.RemoteAddr())
-			delete(clients, msg.Conn.RemoteAddr().String())
 		}
 	}
 }
 
-// client handles communication with a single client.
-func handleClient(conn net.Conn, messages chan Message) {
-	buffer := make([]byte, 64) // Buffer for reading messages
+func client(conn net.Conn, messages chan Message) {
+	buffer := make([]byte, 64)
 	for {
-		n, err := conn.Read(buffer[:])
+		n, err := conn.Read(buffer)
 		if err != nil {
-			log.Printf("Could not read from client %s", conn.RemoteAddr())
 			conn.Close()
 			messages <- Message{
 				Type: ClientDisconnected,
@@ -105,39 +125,35 @@ func handleClient(conn net.Conn, messages chan Message) {
 			}
 			return
 		}
-
+		text := string(buffer[0:n])
 		messages <- Message{
 			Type: NewMessage,
-			Text: string(buffer[0:n]),
+			Text: text,
 			Conn: conn,
 		}
 	}
 }
 
-// main initializes the server and listens for incoming connections.
 func main() {
-	ln, err := net.Listen("tcp", ":8080")
+	ln, err := net.Listen("tcp", ":"+Port)
 	if err != nil {
-		log.Fatalf("ERROR: could not listen to port 8080: %s\n", err)
+		log.Fatalf("Could not listen to epic port %s: %s\n", Port, sensitive(err.Error()))
 	}
-	log.Printf("Listening to TCP connection on port 8080 ...\n")
+	log.Printf("Listening to TCP connections on port %s ...\n", Port)
 
-	messages := make(chan Message) // Channel for message communication
-	go server(messages)            // Start the server in a goroutine
+	messages := make(chan Message)
+	go server(messages)
 
 	for {
-		conn, err := ln.Accept() // Accept new connections
+		conn, err := ln.Accept()
 		if err != nil {
-			log.Printf("Could not accept a connection: %s\n", err)
+			log.Printf("Could not accept a connection: %s\n", sensitive(err.Error()))
 			continue
 		}
-		log.Printf("Accepted connection from %s", conn.RemoteAddr())
-
 		messages <- Message{
 			Type: ClientConnected,
 			Conn: conn,
 		}
-
-		go handleClient(conn, messages) // Handle the client in a new goroutine
+		go client(conn, messages)
 	}
 }
