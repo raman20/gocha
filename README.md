@@ -1,4 +1,4 @@
-# Go Chat Server
+# GoCha (go chat server)
 
 This is a simple TCP chat server written in Go. It allows multiple clients to connect and communicate with each other. The server handles client connections, messages, and implements a basic banning mechanism for clients who send messages too frequently.
 
