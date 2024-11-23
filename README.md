@@ -16,8 +16,8 @@ This is a simple TCP chat server written in Go. It allows multiple clients to co
 
 1. Clone the repository:
    ```bash
-   git clone <repository-url>
-   cd <repository-directory>
+   git clone https://github.com/raman20/gocha
+   cd gocha
    ```
 
 2. Run the server:
