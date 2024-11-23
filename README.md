@@ -27,6 +27,12 @@ This is a simple TCP chat server written in Go. It allows multiple clients to co
 
 3. Connect to the server using a TCP client (e.g., `telnet` or a custom client).
 
+## Future
+
+1. an CLI client
+2. authentication
+3. user ID
+
 ## License
 
 This project is licensed under the MIT License.
